@@ -6,15 +6,14 @@ import type { Agent, ChatRequest } from "../agent/interface.js";
 import { sendTyping } from "../api/api.js";
 import type { WeixinMessage, MessageItem } from "../api/types.js";
 import { MessageItemType, TypingStatus } from "../api/types.js";
-import { downloadRemoteImageToTemp } from "../cdn/upload.js";
 import { downloadMediaFromItem } from "../media/media-download.js";
 import { getExtensionFromMime } from "../media/mime.js";
 import { logger } from "../util/logger.js";
 
 import { setContextToken, bodyFromItemList, isMediaItem } from "./inbound.js";
 import { sendWeixinErrorNotice } from "./error-notice.js";
-import { sendWeixinMediaFile } from "./send-media.js";
-import { markdownToPlainText, sendMessageWeixin } from "./send.js";
+import { deliverChatResponse } from "./deliver.js";
+import { sendStreamingMessageWeixin } from "./send.js";
 import { handleSlashCommand } from "./slash-commands.js";
 
 const MEDIA_TEMP_DIR = "/tmp/weixin-agent/media";
@@ -68,7 +67,10 @@ function extractTextBody(itemList?: MessageItem[]): string {
 function findMediaItem(itemList?: MessageItem[]): MessageItem | undefined {
   if (!itemList?.length) return undefined;
 
-  // Direct media: IMAGE > VIDEO > FILE > VOICE (skip voice with transcription)
+  // Direct media: IMAGE > VIDEO > FILE > VOICE
+  // Voice items are always downloaded — even when WeChat provides a
+  // transcription text — so that audio-aware agents can choose between
+  // the transcript and the original waveform.
   const direct =
     itemList.find(
       (i) => i.type === MessageItemType.IMAGE && i.image_item?.media?.encrypt_query_param,
@@ -82,8 +84,7 @@ function findMediaItem(itemList?: MessageItem[]): MessageItem | undefined {
     itemList.find(
       (i) =>
         i.type === MessageItemType.VOICE &&
-        i.voice_item?.media?.encrypt_query_param &&
-        !i.voice_item.text,
+        i.voice_item?.media?.encrypt_query_param,
     );
   if (direct) return direct;
 
@@ -100,6 +101,13 @@ function findMediaItem(itemList?: MessageItem[]): MessageItem | undefined {
 /**
  * Process a single inbound message:
  *   slash command check → download media → call agent → send reply.
+ *
+ * Supports three reply modes based on what the Agent returns:
+ *   1. **Streaming** — if `agent.chatStream` is defined, the reply is streamed
+ *      using WeChat's GENERATING → FINISH protocol so the bubble updates live.
+ *   2. **Multiple messages** — if `response.messages` is set, each entry is
+ *      sent as a separate WeChat message in order.
+ *   3. **Single message** — the default: `response.text` and/or `response.media`.
  */
 export async function processOneMessage(
   full: WeixinMessage,
@@ -192,33 +200,39 @@ export async function processOneMessage(
 
   // --- Call agent & send reply ---
   try {
-    const response = await deps.agent.chat(request);
+    const deliverOpts = { baseUrl: deps.baseUrl, cdnBaseUrl: deps.cdnBaseUrl, token: deps.token };
 
-    if (response.media) {
-      let filePath: string;
-      const mediaUrl = response.media.url;
-      if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) {
-        filePath = await downloadRemoteImageToTemp(
-          mediaUrl,
-          path.join(MEDIA_TEMP_DIR, "outbound"),
-        );
-      } else {
-        filePath = path.isAbsolute(mediaUrl) ? mediaUrl : path.resolve(mediaUrl);
+    // 1. Streaming path — preferred when the agent supports it AND the agent
+    //    does not explicitly opt out for this request via shouldStream().
+    const useStream =
+      deps.agent.chatStream &&
+      (deps.agent.shouldStream ? deps.agent.shouldStream(request) : true);
+
+    if (useStream && deps.agent.chatStream) {
+      // Cancel typing before streaming — the GENERATING frames serve as the
+      // visual indicator from here on.
+      if (deps.typingTicket) {
+        sendTyping({
+          baseUrl: deps.baseUrl,
+          token: deps.token,
+          body: {
+            ilink_user_id: to,
+            typing_ticket: deps.typingTicket,
+            status: TypingStatus.CANCEL,
+          },
+        }).catch(() => {});
       }
-      await sendWeixinMediaFile({
-        filePath,
+      await sendStreamingMessageWeixin({
         to,
-        text: response.text ? markdownToPlainText(response.text) : "",
-        opts: { baseUrl: deps.baseUrl, token: deps.token, contextToken },
-        cdnBaseUrl: deps.cdnBaseUrl,
-      });
-    } else if (response.text) {
-      await sendMessageWeixin({
-        to,
-        text: markdownToPlainText(response.text),
+        chunks: deps.agent.chatStream(request),
         opts: { baseUrl: deps.baseUrl, token: deps.token, contextToken },
       });
+      return;
     }
+
+    // 2. Single-message or multiple-messages path.
+    const response = await deps.agent.chat(request);
+    await deliverChatResponse(response, to, contextToken, deliverOpts);
   } catch (err) {
     logger.error(`processOneMessage: agent or send failed: ${err instanceof Error ? err.stack ?? err.message : JSON.stringify(err)}`);
     void sendWeixinErrorNotice({
