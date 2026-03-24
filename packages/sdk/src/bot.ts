@@ -130,3 +130,31 @@ export async function start(agent: Agent, opts?: StartOptions): Promise<void> {
     log,
   });
 }
+
+/**
+ * Start multiple bots in parallel — long-polls for new messages on each account
+ * and dispatches them to the agent.
+ * Blocks until the abort signal fires or an unrecoverable error occurs.
+ */
+export async function startMultiple(
+  agent: Agent,
+  opts?: StartOptions & { accountIds?: string[] }
+): Promise<void> {
+  const log = opts?.log ?? console.log;
+
+  const accountIds = opts?.accountIds ?? listWeixinAccountIds();
+  if (accountIds.length === 0) {
+    throw new Error("没有已登录的账号，请先运行 login");
+  }
+
+  log(`[weixin] 启动 ${accountIds.length} 个账号...`);
+
+  await Promise.all(
+    accountIds.map((id) =>
+      start(agent, { ...opts, accountId: id }).catch((err) => {
+        log(`[weixin] 账号 ${id} 启动失败: ${err.message}`);
+        throw err;
+      })
+    )
+  );
+}

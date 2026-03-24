@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "login": "tsx main.ts login",
+    "list": "tsx main.ts list",
     "start": "tsx main.ts start",
     "typecheck": "tsc --noEmit"
   },
