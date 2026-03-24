@@ -56,11 +56,13 @@ npx weixin-acp start -- kimi acp
 
 ## 自定义 Agent
 
-SDK 只导出三样东西：
+SDK 导出以下内容：
 
 - **`Agent`** 接口 —— 实现它就能接入微信
-- **`login()`** —— 扫码登录
-- **`start(agent)`** —— 启动消息循环
+- **`login()`** —— 扫码登录（支持多账号）
+- **`start(agent)`** —— 启动单个账号的消息循环
+- **`startMultiple(agent)`** —— 启动多个账号（并行）
+- **`listWeixinAccountIds()`** —— 列出已登录的账号
 
 ### Agent 接口
 
@@ -130,18 +132,51 @@ await login();
 await start(myAgent);
 ```
 
+### 多账号示例
+
+```typescript
+import { login, startMultiple, listWeixinAccountIds, type Agent } from "weixin-agent-sdk";
+
+const myAgent: Agent = {
+  async chat(req) {
+    // 你的 AI 逻辑...
+    return { text: reply };
+  },
+};
+
+// 登录多个账号（每次 login 添加一个新账号）
+await login();  // 账号 A
+await login();  // 账号 B
+
+// 查看所有已登录的账号
+const accounts = listWeixinAccountIds();
+console.log("已登录账号:", accounts);
+
+// 启动所有账号（并行运行）
+await startMultiple(myAgent);
+
+// 或只启动指定账号
+await startMultiple(myAgent, { accountIds: ["account1", "account2"] });
+```
+
 ### OpenAI 示例
 
-`packages/example-openai/` 是一个完整的 OpenAI Agent 实现，支持多轮对话和图片输入：
+`packages/example-openai/` 是一个完整的 OpenAI Agent 实现，支持多轮对话、图片输入和多账号：
 
 ```bash
 pnpm install
 
-# 扫码登录微信
+# 扫码登录微信（支持多账号，每次 login 添加一个新账号）
 pnpm run login -w packages/example-openai
 
-# 启动 bot
+# 查看已登录的账号
+pnpm run list -w packages/example-openai
+
+# 启动 bot（自动启动所有已登录的账号）
 OPENAI_API_KEY=sk-xxx pnpm run start -w packages/example-openai
+
+# 只启动指定账号
+WEIXIN_ACCOUNT_IDS="account1,account2" pnpm run start -w packages/example-openai
 ```
 
 支持的环境变量：
@@ -152,6 +187,7 @@ OPENAI_API_KEY=sk-xxx pnpm run start -w packages/example-openai
 | `OPENAI_BASE_URL` | 否 | 自定义 API 地址（兼容 OpenAI 接口的第三方服务） |
 | `OPENAI_MODEL` | 否 | 模型名称，默认 `gpt-5.4` |
 | `SYSTEM_PROMPT` | 否 | 系统提示词 |
+| `WEIXIN_ACCOUNT_IDS` | 否 | 指定要启动的微信账号（逗号分隔），不设置则启动所有账号 |
 
 ## 支持的消息类型
 
@@ -189,7 +225,7 @@ OPENAI_API_KEY=sk-xxx pnpm run start -w packages/example-openai
 
 - 使用 **长轮询** (`getUpdates`) 接收消息，无需公网服务器
 - 媒体文件通过微信 CDN 中转，**AES-128-ECB** 加密传输
-- 单账号模式：每次 `login` 覆盖之前的账号
+- 支持 **多账号模式**：可登录多个微信账号，同一 Agent 同时服务所有账号
 - 断点续传：`get_updates_buf` 持久化到 `~/.openclaw/`，重启后从上次位置继续
 - 会话过期自动重连（errcode -14 触发 1 小时冷却后恢复）
 - Node.js >= 22
